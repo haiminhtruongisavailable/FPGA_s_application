@@ -1,1 +1,7 @@
-ref's link: https://github.com/ChristianPalmiero/DHT11-Controller/tree/master
+    SW0,SW1,SW2  
+     1   1   1      1  1  0      1  0  1      1  0  0  |  0   1   1     0  1  0      0  0  1      0  0  0  |  not displayed
+   +------------+------------+------------+------------+------------+------------+------------+------------+-----------------+
+   |    1010    |    0110    |    0001    |    0100    |    0010    |    1110    |    0011    |    1100    |     01011001    |  -> 40 bits from the DHT11 sensor
+   +------------+------------+------------+------------+------------+------------+------------+------------+-----------------+
+                      Humidity data                    |                   Temperature                     |     CHECK SUM
+                    tens, ones  (%)                                       tens, ones(degree)                    mod 256 (hopefully = 0)
