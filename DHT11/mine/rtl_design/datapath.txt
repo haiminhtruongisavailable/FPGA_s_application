@@ -1,0 +1,144 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.std_logic_unsigned.all;
+
+entity datapath is   --parameter setted in the top_module
+  generic(
+    freq:    positive range 1 to 1000 -- Clock frequency (MHz)
+  );
+  port(
+       data_in                :           in    std_ulogic;
+       data_drv               :           in    std_ulogic; --From CU
+       rst	              :	          in    std_ulogic;
+       clk	              :	          in    std_ulogic;
+       en                     :           in    std_ulogic;
+       init_enable            :           in    std_ulogic;    -- when enabled, the COUNTER process threshold is initialised to the init_counter value
+       shift_enable           :           in    std_ulogic;
+       init_counter           :           in    integer;
+       margin                 :           in    integer;
+       threshold_comp         :           in    integer;
+       data                   :           in    std_ulogic;    -- sent by the control unit after a change in the data has been detected in data_in by the two PULSE_GEN processes
+       final_cnt	      :           out   std_ulogic;
+       final_count	      :           out   std_ulogic;
+       rising		      :           out   std_ulogic;
+       falling                :           out   std_ulogic;
+       out_comparator         :           out   std_ulogic_vector(1 DOWNTO 0);
+       out_second_comparator  :           out   std_ulogic;
+       do                     : 	  out 	std_ulogic_vector(39 DOWNTO 0)
+  );
+end entity datapath;
+
+
+architecture beh of datapath is
+
+  signal Q			:  std_ulogic_vector(39 DOWNTO 0);
+  signal cnt                    :  integer range 0 to 40;
+  signal count                  :  integer;
+  signal threshold              :  integer;
+  signal dp             	:  std_ulogic_vector(2 downto 0);
+  signal out_comparator_local   :  std_ulogic_vector(1 DOWNTO 0);
+
+begin
+  --collect and store 40 bits data from DHT11
+  SIPO: process(clk) 
+  begin
+    if rising_edge(clk) then
+        if rst = '1' then
+            Q            <= (others => '0');--Clear all
+            cnt          <= 0;
+            final_count  <= '0';
+            do           <= (others => '0');
+
+        elsif shift_enable = '1' then
+            Q   <= Q(38 downto 0) & data;     -- Left shift
+            cnt <= cnt + 1;
+            if cnt = 38 then                  -- After receiving the 39th bit
+                  final_count <= '1';
+              elsif cnt = 39 then               -- After receiving the 40th bit
+                  do          <= Q(38 downto 0) & data; -- &: Concatanating
+                  final_count <= '0';
+                  cnt         <= 0;
+              else
+                  final_count <= '0';
+              end if;
+          end if;
+      end if;
+  end process SIPO;
+
+
+--counted by fsm's control instead of being free --> flexible and controlable
+	COUNTER: process(clk)
+	begin
+		if rising_edge(clk) then
+			final_cnt <= '0';                    -- Default: no timeout
+			if rst = '1' then
+				count     <= 0;
+				threshold <= 0;
+			elsif init_enable = '1' then --
+				-- Load new timing target from FSM
+				threshold <= init_counter;
+				count     <= 0;
+			elsif en = '1' then
+				if count = threshold - 1 then
+					final_cnt <= '1';            -- Timer has reached target
+					count     <= 0;
+				else
+					count <= count + 1;
+				end if;
+			end if;
+			  end if;
+	end process COUNTER;
+--detect and send rising or falling edge from DHT_11 to FSM.
+	PULSE_GEN: process(clk)
+	begin
+		if rising_edge(clk) then
+			if rst = '1' then
+				dp <= (others => '0');
+			else
+				-- Shift register: store recent history of data_in
+				dp <= data_in & dp(2 downto 1);
+			end if;
+		end if;
+	end process PULSE_GEN;
+	-- Edge detection: stable (avoid noise)
+	rising  <= dp(1) and not(dp(0));   -- Detect rising edge  (0 -> 1)
+	falling <= not(dp(1)) and dp(0);   -- Detect falling edge (1 -> 0) 
+
+	COMPARATOR: process(threshold_comp, margin, count)
+	begin
+		-- Default: No valid result
+		out_comparator_local <= "00";
+		-- Only process when a valid threshold is provided by the FSM
+		if threshold_comp /= 0 then
+			-- Case 1: Count is within the acceptable range (threshold ± margin)
+			if (count >= threshold_comp - margin) and (count <= threshold_comp + margin) then
+				out_comparator_local(0) <= '1';     -- Timing is VALID
+			-- Case 2: Count is higher than the allowed upper limit
+			elsif count > threshold_comp + margin then
+				out_comparator_local(1) <= '1';     -- Timing is TOO LONG (invalid)
+			-- Case 3: Count is lower than the allowed lower limit
+			else
+				out_comparator_local <= "00";       -- Timing is TOO SHORT (invalid)
+			end if;
+		end if;
+	end process COMPARATOR;
+
+  out_comparator <= out_comparator_local;
+-- n * time = the number of clock_cycles need to be used when waiting for this time...
+  SECOND_COMPARATOR: process(out_comparator_local(1), threshold_comp, count)
+	begin
+    out_second_comparator <= '0';   -- Default: not a valid 0 or 1
+    if out_comparator_local(1) = '1' then
+        -- Case: Pulse is longer than base threshold → Check for Logic 1
+        if count >= 65*freq and count <= 75*freq then
+            out_second_comparator <= '1';   -- Valid long pulse → Bit = 1
+        end if;
+    else
+        -- Case: Pulse is shorter than base threshold → Check for Logic 0
+        if count >= 20*freq and count <= 35*freq then 
+            out_second_comparator <= '1';   -- Valid short pulse → Bit = 0
+        end if;
+    end if;
+end process SECOND_COMPARATOR;
+
+end architecture beh;
