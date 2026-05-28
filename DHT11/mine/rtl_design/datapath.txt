@@ -67,7 +67,7 @@ begin
 
 
 --counted by fsm's control instead of being free --> flexible and controlable
-	COUNTER: process(clk)
+	COUNTER: process(clk) -- recieve signal from EN_COUNT_18M and CONFIG_COUNT_18M
 	begin
 		if rising_edge(clk) then
 			final_cnt <= '0';                    -- Default: no timeout
