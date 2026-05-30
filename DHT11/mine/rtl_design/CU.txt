@@ -1,0 +1,248 @@
+LIBRARY IEEE;
+USE IEEE.STD_LOGIC_1164.ALL;
+USE IEEE.NUMERIC_STD.ALL;
+ENTITY CU IS
+  generic(
+    freq: positive range 1 to 1000
+  );
+  PORT (
+    CLK, RST              : IN  STD_ULOGIC;
+    FINAL_COUNTER         : IN  STD_ULOGIC;
+    FINAL_CNT             : IN  STD_ULOGIC;
+    RISING                : IN  STD_ULOGIC;
+    FALLING               : IN  STD_ULOGIC;
+    OUT_DEBOUNCER         : IN  STD_ULOGIC;
+    OUT_COMPARATOR        : IN  STD_ULOGIC_VECTOR(1 DOWNTO 0);
+    OUT_SECOND_COMPARATOR : IN  STD_ULOGIC;
+
+          EN                    : OUT STD_ULOGIC;
+          INITIAL_ENABLE        : OUT STD_ULOGIC;
+          SHIFT_ENABLE          : OUT STD_ULOGIC;
+          BUSY_BIT              : OUT STD_ULOGIC;
+          PROTOCOL_ERROR        : OUT STD_ULOGIC;
+          INIT_COUNTER          : OUT INTEGER;
+          MARGIN                : OUT INTEGER;
+          THRESHOLD_COMP        : OUT INTEGER;
+          DATA                  : OUT STD_ULOGIC;
+          DATA_DRV              : OUT STD_ULOGIC
+        );
+      END ENTITY CU;
+      ARCHITECTURE BEHAV OF CU IS
+        TYPE StateType IS (IDLE, PROTOCOL_ERROR_STATE, CONFIG_COUNT_1S, EN_COUNT_1S,
+                           CONFIG_COUNT_18M, EN_COUNT_18M, CONFIG_COUNT_20, EN_COUNT_20,
+                       CONFIG_COUNT_80, EN_COUNT_80, CONFIG_COUNT_80_2, EN_COUNT_80_2,
+                       CONFIG_COUNT_50, EN_COUNT_50, CONFIG_COUNT_26, EN_COUNT_26,
+                       REC_0, REC_1); --synthesis tool determines which bit that this type must have
+    SIGNAL CURR_STATE, NEXT_STATE : StateType;
+  BEGIN
+    -- State Register
+    Transition: PROCESS(CLK)
+    BEGIN
+      IF rising_edge(CLK) THEN
+        IF RST = '1' THEN
+          CURR_STATE <= IDLE;
+        ELSE
+          CURR_STATE <= NEXT_STATE;
+        END IF;
+      END IF;
+    END PROCESS Transition;
+    -- Next State Logic
+    P_Next_State: PROCESS(CURR_STATE, FINAL_COUNTER, FINAL_CNT, RISING, FALLING,
+                          OUT_COMPARATOR, OUT_SECOND_COMPARATOR) 	  -- what will be the next state with each input?
+	--main confusion:  INIT_COUNTER = How long the counter is allowed to count.
+	--				   THRESHOLD_COMP = What value the comparator uses to judge whether the timing is goodor bad.
+    BEGIN
+      NEXT_STATE <= CURR_STATE;
+      CASE CURR_STATE IS
+        WHEN IDLE =>
+          NEXT_STATE <= CONFIG_COUNT_1S;
+        WHEN CONFIG_COUNT_1S =>
+          NEXT_STATE <= EN_COUNT_1S;
+        WHEN EN_COUNT_1S =>
+          IF FINAL_CNT = '1' THEN
+            NEXT_STATE <= CONFIG_COUNT_18M;           -- Changed: auto start
+          ELSE
+            NEXT_STATE <= EN_COUNT_1S;
+          END IF;
+        WHEN CONFIG_COUNT_18M => NEXT_STATE <= EN_COUNT_18M;
+        WHEN EN_COUNT_18M =>
+          IF FINAL_CNT = '1' THEN
+            NEXT_STATE <= CONFIG_COUNT_20;
+          ELSE
+            NEXT_STATE <= EN_COUNT_18M;
+          END IF;
+        WHEN CONFIG_COUNT_20 => NEXT_STATE <= EN_COUNT_20;
+        WHEN EN_COUNT_20 =>
+          IF OUT_COMPARATOR(0) = '1' THEN
+            IF FALLING = '1' THEN
+              NEXT_STATE <= CONFIG_COUNT_80;
+            ELSE
+              NEXT_STATE <= EN_COUNT_20;
+            END IF;
+          ELSE --invalid field
+            IF FALLING = '1' OR OUT_COMPARATOR(1) = '1' THEN --fail too early or pulse too long.
+			--extended: MCU recieve signal from DHT11 now --> problem like fail too early can be caused by IC inside DHT11
+              NEXT_STATE <= PROTOCOL_ERROR_STATE;
+            ELSE
+              NEXT_STATE <= EN_COUNT_20;
+            END IF;
+          END IF;
+        WHEN CONFIG_COUNT_80 => NEXT_STATE <= EN_COUNT_80;
+        WHEN EN_COUNT_80 =>
+          IF OUT_COMPARATOR(0) = '1' THEN
+            IF RISING = '1' THEN
+              NEXT_STATE <= CONFIG_COUNT_80_2;
+            ELSE
+              NEXT_STATE <= EN_COUNT_80;
+            END IF;
+          ELSE
+            IF RISING = '1' OR OUT_COMPARATOR(1) = '1' THEN
+              NEXT_STATE <= PROTOCOL_ERROR_STATE;
+            ELSE
+              NEXT_STATE <= EN_COUNT_80;
+            END IF;
+          END IF;
+        WHEN CONFIG_COUNT_80_2 => NEXT_STATE <= EN_COUNT_80_2;
+        WHEN EN_COUNT_80_2 =>
+          IF OUT_COMPARATOR(0) = '1' THEN
+            IF FALLING = '1' THEN
+              NEXT_STATE <= CONFIG_COUNT_50;
+            ELSE
+              NEXT_STATE <= EN_COUNT_80_2;
+            END IF;
+          ELSE
+            IF FALLING = '1' OR OUT_COMPARATOR(1) = '1' THEN
+              NEXT_STATE <= PROTOCOL_ERROR_STATE;
+            ELSE
+              NEXT_STATE <= EN_COUNT_80_2;
+            END IF;
+          END IF;
+        WHEN CONFIG_COUNT_50 => NEXT_STATE <= EN_COUNT_50;--filter
+        WHEN EN_COUNT_50 =>
+          IF OUT_COMPARATOR(0) = '1' THEN
+            IF RISING = '1' THEN
+              NEXT_STATE <= CONFIG_COUNT_26;
+            ELSE
+              NEXT_STATE <= EN_COUNT_50;
+            END IF;
+          ELSE
+            IF RISING = '1' OR OUT_COMPARATOR(1) = '1' THEN--rising too fast
+              NEXT_STATE <= PROTOCOL_ERROR_STATE;
+            ELSE
+              NEXT_STATE <= EN_COUNT_50;
+            END IF;
+          END IF;
+        WHEN CONFIG_COUNT_26 => NEXT_STATE <= EN_COUNT_26;
+        WHEN EN_COUNT_26 =>
+          IF FALLING = '1' THEN
+            IF OUT_COMPARATOR(1) = '1' THEN  --too long
+              NEXT_STATE <= PROTOCOL_ERROR_STATE; --Invalid/unsafe(physic) zone 35–65µs
+            ELSIF OUT_SECOND_COMPARATOR = '1' THEN  
+              NEXT_STATE <= REC_1;
+            ELSE
+              NEXT_STATE <= REC_0;
+            END IF;
+          ELSE
+            IF FINAL_CNT = '1' THEN --threshold but not falling <-- can be from missing pulse
+              NEXT_STATE <= PROTOCOL_ERROR_STATE;
+            ELSE
+              NEXT_STATE <= EN_COUNT_26;
+            END IF;
+          END IF;
+        WHEN REC_0 =>
+          IF FINAL_COUNTER = '1' THEN
+            NEXT_STATE <= CONFIG_COUNT_18M;           -- Changed: auto restart
+          ELSE
+            NEXT_STATE <= EN_COUNT_50;
+          END IF;
+        WHEN REC_1 =>
+          IF FINAL_COUNTER = '1' THEN
+            NEXT_STATE <= CONFIG_COUNT_18M;           -- Changed: auto restart
+          ELSE
+            NEXT_STATE <= EN_COUNT_50;
+          END IF;
+        WHEN PROTOCOL_ERROR_STATE =>
+          NEXT_STATE <= CONFIG_COUNT_18M;             -- Changed: auto restart after error
+        WHEN OTHERS =>
+          NEXT_STATE <= CONFIG_COUNT_18M;
+      END CASE;
+    END PROCESS P_Next_State;
+    -- Output Logic
+    CU_Output: PROCESS(CURR_STATE)  -- What will be the output of each state
+    BEGIN
+      EN              <= '0';
+      INITIAL_ENABLE  <= '0';
+      SHIFT_ENABLE    <= '0';
+      DATA_DRV        <= '0';
+      BUSY_BIT        <= '0';
+      PROTOCOL_ERROR  <= '0';
+      DATA            <= '0';
+      INIT_COUNTER    <= 50000000;
+      THRESHOLD_COMP  <= 0;
+      MARGIN          <= 0;
+      CASE CURR_STATE IS
+        WHEN IDLE => NULL;
+        WHEN CONFIG_COUNT_1S =>
+          INITIAL_ENABLE <= '1'; BUSY_BIT <= '1'; INIT_COUNTER <= 1000000*freq;
+        WHEN EN_COUNT_1S =>
+          EN <= '1'; BUSY_BIT <= '1';
+        WHEN CONFIG_COUNT_18M => --wait 18ms. Wait, why it must be 18ms here?
+          INITIAL_ENABLE <= '1'; -- Signal before hearing signal from DHT11
+		  INIT_COUNTER <= 20000*freq; --set up time, connected to int_counter pin in COUNTER block
+		  DATA_DRV <= '1'; --Let's me tell you sensor... 
+		  BUSY_BIT <=   '1';
+        WHEN EN_COUNT_18M =>
+          EN <= '1'; -- Start counting by COUNTER block
+		  DATA_DRV <= '1'; 
+		  BUSY_BIT <= '1';
+        WHEN CONFIG_COUNT_20 =>
+          INITIAL_ENABLE <= '1'; --Sending signal to COUNT block 
+		  THRESHOLD_COMP <= 30*freq; --Set constraint of COUNT block
+		  MARGIN <= 20*freq; 
+		  BUSY_BIT <=  '1';
+        WHEN EN_COUNT_20 =>
+          EN <= '1';  --
+		  BUSY_BIT <= '1'; 
+        WHEN PROTOCOL_ERROR_STATE =>
+          PROTOCOL_ERROR <= '1';
+        WHEN CONFIG_COUNT_80 =>
+          INITIAL_ENABLE <= '1'; 
+		  THRESHOLD_COMP <= 80*freq; 
+		  BUSY_BIT <= '1'; 
+		  MARGIN <=   12*freq;
+        WHEN EN_COUNT_80 =>
+          EN <= '1'; 
+        WHEN CONFIG_COUNT_80_2 =>
+          INITIAL_ENABLE <= '1'; THRESHOLD_COMP <= 80*freq; BUSY_BIT <= '1'; MARGIN <=  12*freq;
+        WHEN EN_COUNT_80_2 =>
+          EN <= '1'; BUSY_BIT <= '1'; THRESHOLD_COMP <= 80*freq; MARGIN <= 12*freq;
+        WHEN CONFIG_COUNT_50 =>
+          INITIAL_ENABLE <= '1'; THRESHOLD_COMP <= 50*freq; BUSY_BIT <= '1'; MARGIN <=   10*freq;
+        WHEN EN_COUNT_50 =>
+          EN <= '1'; BUSY_BIT <= '1'; THRESHOLD_COMP <= 50*freq; MARGIN <= 10*freq;
+        WHEN CONFIG_COUNT_26 =>
+          INITIAL_ENABLE <= '1'; THRESHOLD_COMP <= 50*freq; BUSY_BIT <= '1'; INIT_COUNTER  <= 77*freq;
+        WHEN EN_COUNT_26 =>
+          EN <= '1'; BUSY_BIT <= '1'; THRESHOLD_COMP <= 50*freq;
+        WHEN REC_0 =>
+          INITIAL_ENABLE <= '1'; BUSY_BIT <= '1'; SHIFT_ENABLE <= '1'; THRESHOLD_COMP <=  50*freq; MARGIN <= 5*freq;
+        WHEN REC_1 =>
+          DATA <= '1'; INITIAL_ENABLE <= '1'; BUSY_BIT <= '1'; SHIFT_ENABLE <= '1';   THRESHOLD_COMP <= 50*freq; MARGIN <= 5*freq;
+        WHEN OTHERS => NULL;
+    END PROCESS CU_Output;
+  END ARCHITECTURE BEHAV;
+  
+ 
+  /*
+  Phase          States                                                Purpose
+─────────────  ────────────────────────────────────────────────────  ──────────────────
+Power-up       IDLE, CONFIG_COUNT_1S, EN_COUNT_1S                    Wait 1 second
+Start Signal   CONFIG_COUNT_18M, EN_COUNT_18M, CONFIG_COUNT_20,      Send 18ms low
+               EN_COUNT_20
+DHT11          CONFIG_COUNT_80, EN_COUNT_80                          Wait for 80µs +
+Response                                                             80µs
+Bit Reception  CONFIG_COUNT_50, EN_COUNT_50, CONFIG_COUNT_26,        Receive each bit
+               EN_COUNT_26
+Store Bit      REC_0, REC_1                                          Shift bit into
+                                                                     SIPO
+Error          PROTOCOL_ERROR_STATE                                  Handle errors*/
